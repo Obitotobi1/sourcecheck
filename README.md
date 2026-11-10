@@ -5,20 +5,34 @@ Does this page really say that? SourceCheck lets anyone submit a claim and a sou
 Claims that cite a source are everywhere (news, docs, reports, social posts). A normal smart contract cannot read the web, and a single AI answer is not trustworthy. SourceCheck turns "the page says so" into a verdict that many independent validators had to agree on, with a quote anyone can verify.
 
 - **Live app:** https://obitotobi1.github.io/sourcecheck/
-- **Contract (GenLayer Studio):** `0xab7F99bBfC2F25eDdfAfe2ad26D866075CD1e9e4`
+- **Contract (GenLayer Studio):** `0x22a3D6a79EF83c3Dbcc95B5e7F2AD7097A35168F`
 - **Contract source:** [`sourcecheck.py`](./sourcecheck.py)
 - **Tests:** [`tests/test_sourcecheck.py`](./tests/test_sourcecheck.py)
+
+## What's new in v1.1 (milestone)
+
+| | v1.0 | v1.1 |
+|---|---|---|
+| Sources per claim | 1 | 1 to 3 (`submit_multi`) |
+| Verdict | SUPPORTED, CONTRADICTED, NOT_FOUND | adds **MIXED** |
+| Result detail | one quote | per-source verdict and quote, plus support and contradict counts |
+| Rule | the model's verdict | **strict majority of all sources** decides, computed in contract code, not by the model |
+| Unreadable source | whole check fails | counts as a non-supporting source; the check only fails if every source is unreadable |
+| Tests | 11 | 19 |
+| App | single URL field | one claim, up to 3 sources, a per-source result card |
+
+Why it matters: one page can be wrong or biased. Asking several pages and requiring most of them to agree makes a Supported verdict much harder to fake, and Mixed tells you honestly when sources disagree.
 
 ## How it works
 
 ```
-submit(claim, url) --> PENDING --run--> CHECKED (verdict + quote)
+submit(claim, url) or submit_multi(claim, urls) --> PENDING --run--> CHECKED (verdict + quote)
                           |
                           +--> UNREACHABLE (retry, up to 3 attempts)
 ```
 
-1. `submit(claim, url)` stores a check (public https page only).
-2. `run(check_id)` makes every validator fetch the page (`gl.nondet.web.render`, first 6,000 characters), ask its model, and reach consensus with `gl.eq_principle.prompt_comparative`: the `verdict` must be identical, the quote wording may differ.
+1. `submit(claim, url)` or `submit_multi(claim, urls)` stores a check with 1 to 3 public https pages.
+2. `run(check_id)` makes every validator fetch the page (`gl.nondet.web.render`, first 6,000 characters), ask its model, and reach consensus with `gl.eq_principle.prompt_comparative` on the list of per-source results: every source's `verdict` must be identical, quote wording may differ. The overall verdict is then computed by plain contract code: SUPPORTED or CONTRADICTED needs more than half of all sources, otherwise MIXED (some agree) or NOT_FOUND (none do).
 3. `is_supported(owner, claim, url)` lets anyone, including other contracts, read the result.
 
 ## What it protects against
@@ -36,7 +50,7 @@ submit(claim, url) --> PENDING --run--> CHECKED (verdict + quote)
 
 - `get_check(check_id)` returns the full record as JSON (claim, url, status, verdict, quote)
 - `get_checks_by_owner(owner)` returns that wallet's checks
-- `is_supported(owner, claim, url)` is `true` only for a stored `SUPPORTED` verdict
+- `is_supported(owner, claim, url)` is `true` only for a stored overall `SUPPORTED` verdict, where `url` is any of the check's sources
 
 ## Live demo
 
@@ -60,7 +74,7 @@ Every write shows the transaction lifecycle: signed, submitted, accepted by cons
 python3 tests/test_sourcecheck.py
 ```
 
-It covers URL refusal, owner-only runs, invented quotes being downgraded, garbage model output, unreachable pages and the attempt cap, prompt fencing, page truncation and the read API (11 tests).
+It covers URL refusal, owner-only runs, invented quotes being downgraded, garbage model output, unreachable pages and the attempt cap, prompt fencing, page truncation and the read API (19 tests, including majority, mixed, contradicted, unreadable-source and source-list rules).
 
 ## Limits
 
