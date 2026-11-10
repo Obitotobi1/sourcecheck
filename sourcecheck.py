@@ -11,6 +11,8 @@ MAX_URL = 300
 MAX_CLAIM = 300
 MAX_PAGE = 6000
 MAX_CHECKS_PER_OWNER = 30
+MAX_SOURCES = 3
+VERDICTS_ALL = ("SUPPORTED", "CONTRADICTED", "NOT_FOUND", "MIXED")
 
 
 def url_problem(url: str) -> str:
@@ -87,6 +89,43 @@ def parse_verdict(res: str, page: str) -> dict:
     return {"verdict": verdict, "quote": quote}
 
 
+def split_urls(text: str) -> list:
+    """Split a list of links (spaces, commas or new lines) and drop duplicates."""
+    raw = str(text).replace(",", " ").replace("\n", " ").replace("\t", " ").split(" ")
+    out = []
+    for u in raw:
+        u = u.strip()
+        if u and u not in out:
+            out.append(u)
+    return out
+
+
+def combine(results: list) -> dict:
+    """Deterministic overall verdict from per-source results.
+    SUPPORTED / CONTRADICTED need a strict majority of ALL sources; otherwise
+    MIXED (some support or contradict) or NOT_FOUND (none do)."""
+    n = len(results)
+    sup = sum(1 for r in results if r["verdict"] == "SUPPORTED")
+    con = sum(1 for r in results if r["verdict"] == "CONTRADICTED")
+    reachable = sum(1 for r in results if r["verdict"] != "UNREACHABLE")
+    if reachable == 0:
+        return {"verdict": "UNREACHABLE", "quote": "", "supported": 0, "contradicted": 0, "sources": n}
+    if sup * 2 > n:
+        overall = "SUPPORTED"
+    elif con * 2 > n:
+        overall = "CONTRADICTED"
+    elif sup + con == 0:
+        overall = "NOT_FOUND"
+    else:
+        overall = "MIXED"
+    quote = ""
+    for r in results:
+        if r["verdict"] == overall and r["quote"]:
+            quote = r["quote"]
+            break
+    return {"verdict": overall, "quote": quote, "supported": sup, "contradicted": con, "sources": n}
+
+
 class SourceCheck(gl.Contract):
     checks: TreeMap[u256, str]       # check_id -> JSON record
     by_owner: TreeMap[str, str]      # owner address (lowercase) -> JSON list of ids
@@ -115,26 +154,37 @@ class SourceCheck(gl.Contract):
     # ---------- lifecycle ----------
     @gl.public.write
     def submit(self, claim: str, url: str) -> int:
+        return self._create(claim, [url.strip()])
+
+    @gl.public.write
+    def submit_multi(self, claim: str, urls: str) -> int:
+        """Check one claim against 1 to 3 sources (separated by spaces, commas or new lines)."""
+        return self._create(claim, split_urls(urls))
+
+    def _create(self, claim: str, urls: list) -> int:
         claim = " ".join(claim.split())
-        url = url.strip()
         if not (0 < len(claim) <= MAX_CLAIM):
             raise Exception("claim must be 1-300 characters")
-        problem = url_problem(url)
-        if problem:
-            raise Exception(problem)
+        if not (1 <= len(urls) <= MAX_SOURCES):
+            raise Exception("give 1 to 3 source links")
+        for u in urls:
+            problem = url_problem(u)
+            if problem:
+                raise Exception(problem)
         owner = self._sender()
         ids = self._owner_ids(owner)
         if len(ids) >= MAX_CHECKS_PER_OWNER:
             raise Exception("check limit reached for this wallet")
         for cid in ids:
             old = self._load(cid)
-            if old["claim"].lower() == claim.lower() and old["url"] == url:
-                raise Exception("you already submitted this claim for this url")
+            if old["claim"].lower() == claim.lower() and old["urls"] == urls:
+                raise Exception("you already submitted this claim for these sources")
         check_id = int(self.next_id)
         self.next_id = u256(check_id + 1)
         self._save(check_id, {
-            "id": check_id, "owner": owner, "claim": claim, "url": url,
+            "id": check_id, "owner": owner, "claim": claim, "urls": urls, "url": urls[0],
             "status": PENDING, "attempts": 0, "verdict": "", "quote": "",
+            "sources": [], "supported": 0, "contradicted": 0,
         })
         ids.append(check_id)
         self.by_owner[owner] = json.dumps(ids)
@@ -149,31 +199,48 @@ class SourceCheck(gl.Contract):
             raise Exception("check already has a verdict")
         if rec["attempts"] >= MAX_ATTEMPTS:
             raise Exception("too many attempts, submit a new check")
-        url, claim = rec["url"], rec["claim"]
+        urls, claim = rec["urls"], rec["claim"]
 
         def leader() -> str:
-            try:
-                page = gl.nondet.web.render(url, mode="text")
-            except Exception:
-                return json.dumps({"verdict": "UNREACHABLE", "quote": ""})
-            page = str(page)[:MAX_PAGE]
-            if page.strip() == "":
-                return json.dumps({"verdict": "UNREACHABLE", "quote": ""})
-            res = gl.nondet.exec_prompt(build_prompt(claim, page))
-            return json.dumps(parse_verdict(res, page), sort_keys=True)
+            results = []
+            for u in urls:
+                try:
+                    page = str(gl.nondet.web.render(u, mode="text"))[:MAX_PAGE]
+                except Exception:
+                    page = ""
+                if page.strip() == "":
+                    results.append({"url": u, "verdict": "UNREACHABLE", "quote": ""})
+                    continue
+                res = gl.nondet.exec_prompt(build_prompt(claim, page))
+                v = parse_verdict(res, page)
+                results.append({"url": u, "verdict": v["verdict"], "quote": v["quote"]})
+            return json.dumps(results, sort_keys=True)
 
         out = json.loads(gl.eq_principle.prompt_comparative(
             leader,
-            "The 'verdict' field must be identical. The 'quote' may differ as long as "
-            "it supports the same verdict.",
+            "The list must have the same sources in the same order. For every source the "
+            "'verdict' field must be identical. Quote wording may differ if it supports "
+            "the same verdict.",
         ))
+        # Never trust the list shape or values blindly: rebuild it from the known URLs.
+        clean = []
+        for i, u in enumerate(urls):
+            r = out[i] if isinstance(out, list) and i < len(out) and isinstance(out[i], dict) else {}
+            v = str(r.get("verdict", ""))
+            if v not in ("SUPPORTED", "CONTRADICTED", "NOT_FOUND", "UNREACHABLE"):
+                v = "NOT_FOUND"
+            clean.append({"url": u, "verdict": v, "quote": str(r.get("quote", ""))[:200]})
+        total = combine(clean)
         rec["attempts"] += 1
-        if out.get("verdict") == "UNREACHABLE":
+        rec["sources"] = clean
+        rec["supported"] = total["supported"]
+        rec["contradicted"] = total["contradicted"]
+        if total["verdict"] == "UNREACHABLE":
             rec["status"] = UNREACHABLE
         else:
             rec["status"] = CHECKED
-            rec["verdict"] = out.get("verdict", "NOT_FOUND")
-            rec["quote"] = out.get("quote", "")
+            rec["verdict"] = total["verdict"]
+            rec["quote"] = total["quote"]
         self._save(check_id, rec)
 
     # ---------- composable read API ----------
@@ -187,7 +254,8 @@ class SourceCheck(gl.Contract):
         for cid in self._owner_ids(owner):
             c = self._load(cid)
             out.append({"id": c["id"], "claim": c["claim"], "url": c["url"],
-                        "status": c["status"], "verdict": c["verdict"]})
+                        "sources": len(c["urls"]), "status": c["status"],
+                        "verdict": c["verdict"]})
         return json.dumps(out)
 
     @gl.public.view
@@ -195,7 +263,7 @@ class SourceCheck(gl.Contract):
         claim = " ".join(claim.split()).lower()
         for cid in self._owner_ids(owner):
             c = self._load(cid)
-            if (c["claim"].lower() == claim and c["url"] == url.strip()
+            if (c["claim"].lower() == claim and url.strip() in c["urls"]
                     and c["verdict"] == "SUPPORTED"):
                 return True
         return False
