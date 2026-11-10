@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SourceCheck | Does this page really say that? Checked on GenLayer</title>
+<title>SourceCheck | Does the evidence really say that? Checked on GenLayer</title>
 <meta name="description" content="Submit a claim and a source link. GenLayer validators read the live page and agree whether it supports the claim, contradicts it or does not say. Every verdict carries a quote copied from the page.">
 <style>
 :root{--bg:#0b0b0e;--card:#14141a;--line:#2a2a34;--fg:#f1f1f4;--mute:#9a9aa8;--acc:#a78bfa;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171}
@@ -27,7 +27,8 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;word-break:break-all}
 .mute{color:var(--mute)}
 .chip{display:inline-block;padding:2px 10px;border-radius:99px;border:1px solid var(--line);font-size:12px;font-weight:600}
-.chip.PENDING{color:var(--warn)}.chip.CHECKED{color:var(--ok);border-color:var(--ok)}.chip.UNREACHABLE{color:var(--bad)}.chip.SUPPORTED{color:var(--ok);border-color:var(--ok)}.chip.CONTRADICTED{color:var(--bad);border-color:var(--bad)}.chip.NOT_FOUND{color:var(--warn);border-color:var(--warn)}
+.chip.PENDING{color:var(--warn)}.chip.CHECKED{color:var(--ok);border-color:var(--ok)}.chip.UNREACHABLE{color:var(--bad)}.chip.SUPPORTED{color:var(--ok);border-color:var(--ok)}.chip.CONTRADICTED{color:var(--bad);border-color:var(--bad)}.chip.NOT_FOUND{color:var(--warn);border-color:var(--warn)}.chip.MIXED{color:var(--warn);border-color:var(--warn)}
+.src{border:1px solid var(--line);border-radius:10px;padding:10px;margin:8px 0}
 .chip.ok{color:var(--ok);border-color:var(--ok)}
 .item{border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px;cursor:pointer}
 .item.sel{border-color:var(--acc)}
@@ -53,7 +54,7 @@ a{color:var(--acc)}
     <h1>🔎 SourceCheck</h1>
     <div class="chip">GenLayer Studio network</div>
   </header>
-  <p class="sub">Does this page really say that? Submit a claim and a source link. Validators read the live page, each ask a model, and must agree: <b>supported</b>, <b>contradicted</b> or <b>not found</b>. A verdict only counts if it carries a quote that really appears on the page.</p>
+  <p class="sub">Does this page really say that? Submit a claim and up to 3 source links. Validators read each live page, each ask a model, and must agree. The result is <b>supported</b>, <b>contradicted</b>, <b>mixed</b> or <b>not found</b>. A verdict only counts if it carries a quote that really appears on the page.</p>
 
   <div class="card" id="boot">Loading GenLayer SDK…</div>
 
@@ -88,9 +89,9 @@ a{color:var(--acc)}
         <h2>Submit a claim and its source</h2>
         <label>The claim (one sentence, max 300 characters)</label>
         <textarea id="f_claim" maxlength="300" placeholder="The report was published in 2024"></textarea>
-        <label>Source: public https page that should back it up</label>
-        <input id="f_url" spellcheck="false" placeholder="https://example.com/report">
-        <p class="mute" style="margin:10px 0 0"><small>Works best with pages that are mostly text (articles, docs, GitHub README via raw.githubusercontent.com). Only https links to public hosts are accepted: localhost, private IP addresses and links with passwords are refused. Only the first 6,000 characters of the page are read.</small></p>
+        <label>Sources: 1 to 3 public https pages, one per line</label>
+        <textarea id="f_url" spellcheck="false" placeholder="https://example.com/report&#10;https://another-site.com/article"></textarea>
+        <p class="mute" style="margin:10px 0 0"><small>Works best with pages that are mostly text (articles, docs, GitHub README via raw.githubusercontent.com). Only https links to public hosts are accepted: localhost, private IP addresses and links with passwords are refused. Each page is judged separately (first 6,000 characters). With several sources, a strict majority of all sources must agree for Supported or Contradicted; otherwise the result is Mixed or Not found.</small></p>
         <div class="row" style="margin-top:14px"><button id="newBtn">Submit check</button></div>
       </div>
     </div>
@@ -127,7 +128,7 @@ a{color:var(--acc)}
 </div>
 
 <script type="module">
-const DEFAULT_CONTRACT = "0xab7F99bBfC2F25eDdfAfe2ad26D866075CD1e9e4";
+const DEFAULT_CONTRACT = "0x22a3D6a79EF83c3Dbcc95B5e7F2AD7097A35168F";
 const EXAMPLE_OWNER = "0xb2B565655Dd79A3b8aF76e846C22161bC47D044D";
 const EXAMPLE_URL = "https://raw.githubusercontent.com/Obitotobi1/prooflink/main/README.md";
 const EXAMPLE_CLAIM = "ProofLink proves that a wallet controls a public web page";
@@ -205,7 +206,7 @@ async function refresh() {
     <div class="item ${selected === c.id ? "sel" : ""}" data-id="${c.id}">
       <div class="row"><b class="grow">#${c.id}</b>${c.verdict ? `<span class="chip ${esc(c.verdict)}">${esc(c.verdict.replace("_"," "))}</span>` : `<span class="chip ${esc(c.status)}">${esc(c.status)}</span>`}</div>
       <div>${esc(c.claim)}</div>
-      <div class="mono mute">${esc(c.url)}</div>
+      <div class="mono mute">${esc(c.url)}${c.sources > 1 ? ` <b>+${c.sources - 1} more</b>` : ""}</div>
     </div>`).join("");
   box.querySelectorAll(".item").forEach((el) => el.onclick = () => { selected = Number(el.dataset.id); refresh(); });
   if (selected && items.some((c) => c.id === selected)) renderDetail(await readJson("get_check", [selected]));
@@ -215,17 +216,18 @@ async function refresh() {
 function renderDetail(c) {
   const d = $("detail"); d.hidden = false;
   const canRun = c.status === "PENDING" || c.status === "UNREACHABLE";
-  const label = { SUPPORTED: "Supported ✓", CONTRADICTED: "Contradicted ✗", NOT_FOUND: "Not found on the page" }[c.verdict] || "";
+  const label = { SUPPORTED: "Supported ✓", CONTRADICTED: "Contradicted ✗", NOT_FOUND: "Not found on the page", MIXED: "Mixed: sources disagree or too few support it" }[c.verdict] || "";
   d.innerHTML = `
     <div class="row"><h2 style="margin:0" class="grow">Check #${esc(c.id)}</h2><span class="chip ${esc(c.status)}">${esc(c.status)}</span></div>
     <label>Claim</label><div>${esc(c.claim)}</div>
-    <label>Source</label><div class="mono">${esc(c.url)}</div>
+    <label>${(c.urls || []).length > 1 ? "Sources" : "Source"}</label>${(c.urls || [c.url]).map((u) => `<div class="mono">${esc(u)}</div>`).join("")}
     <small>Attempts used: ${esc(c.attempts)} of 3</small>
     ${c.status === "CHECKED" ? `<p class="big chipText ${esc(c.verdict)}" style="color:var(--${c.verdict === "SUPPORTED" ? "ok" : c.verdict === "CONTRADICTED" ? "bad" : "warn"})">${esc(label)}</p>
       ${c.quote ? `<label>Quote copied from the page</label><div class="quote">${esc(c.quote)}</div>` : `<p class="mute"><small>No supporting or contradicting quote was found on the page, so no verdict beyond "not found" is allowed.</small></p>`}
+      ${(c.sources || []).length > 1 ? `<label>What each source said (${esc(c.supported)} support, ${esc(c.contradicted)} contradict, out of ${(c.sources || []).length})</label>${c.sources.map((r) => `<div class="src"><div class="row"><span class="chip ${esc(r.verdict)}">${esc(r.verdict.replace("_"," "))}</span><span class="mono mute grow">${esc(r.url)}</span></div>${r.quote ? `<div class="quote">${esc(r.quote)}</div>` : ""}</div>`).join("")}` : ""}
       <p class="mute"><small>Stored on-chain. Any contract can read it with <span class="mono">is_supported(owner, claim, url)</span>.</small></p>` : ""}
-    ${canRun ? `<p class="mute">Click <b>Run check</b>. Each validator fetches the page, asks its model, and they must agree on the verdict.</p>` : ""}
-    ${c.status === "UNREACHABLE" ? `<p class="mute"><small>The page could not be read (blocked, empty or down). Try again in a moment.</small></p>` : ""}
+    ${canRun ? `<p class="mute">Click <b>Run check</b>. Each validator fetches every source, asks its model about each one, and they must agree.</p>` : ""}
+    ${c.status === "UNREACHABLE" ? `<p class="mute"><small>None of the pages could be read (blocked, empty or down). Try again in a moment.</small></p>` : ""}
     <div class="row" style="margin-top:14px">${canRun ? `<button id="runBtn">Run check</button>` : ""}</div>`;
   if ($("runBtn")) $("runBtn").onclick = () => send(`Run check #${c.id}`, "run", [c.id], "Validators are reading the page and agreeing on a verdict. This can take a few minutes.").then(refresh);
 }
@@ -239,12 +241,13 @@ function bind() {
   $("contract").onchange = () => { store.set("sc_contract_v1", addr()); selected = null; refresh(); };
   $("who").onchange = () => { current = $("who").value; selected = null; makeClient(); refresh(); };
   $("reload").onclick = refresh;
-  $("newkeys").onclick = () => { if (confirm("Generate new demo accounts? The old ones are lost.")) { store.set("pl_key_A", ""); store.set("pl_key_B", ""); location.reload(); } };
+  $("newkeys").onclick = () => { if (confirm("Generate new demo accounts? The old ones are lost.")) { store.set("sc_key_A", ""); store.set("sc_key_B", ""); location.reload(); } };
   $("newBtn").onclick = async () => {
     const claim = $("f_claim").value.trim().replace(/\s+/g, " "), u = $("f_url").value.trim();
+    const list = u.split(/[\s,]+/).filter(Boolean);
     if (!claim || claim.length > 300) { alert("Write the claim in 1 to 300 characters."); return; }
-    if (!u.startsWith("https://")) { alert("Enter a public link that starts with https://"); return; }
-    const ok = await send("Submit check", "submit", [claim, u]);
+    if (list.length < 1 || list.length > 3 || list.some((x) => !x.startsWith("https://"))) { alert("Enter 1 to 3 public links, each starting with https://"); return; }
+    const ok = await send("Submit check", "submit_multi", [claim, list.join("\n")]);
     if (ok) { $("f_claim").value = ""; document.querySelector('[data-tab="claims"]').click(); }
   };
   $("c_example").onclick = () => { $("c_owner").value = EXAMPLE_OWNER; $("c_claim").value = EXAMPLE_CLAIM; $("c_url").value = EXAMPLE_URL; };
